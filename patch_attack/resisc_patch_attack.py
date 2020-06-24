@@ -24,7 +24,7 @@ tf.compat.v1.disable_v2_behavior()
 sess = tf.compat.v1.InteractiveSession()
 plt.rcParams['figure.figsize'] = [10, 10] 
 
-
+SCALE = 0.35
 num_classes = 45
 label_name = ['airplane', 'airport', 'baseball_diamond', 'basketball_court', 'beach', 'bridge', 'chaparral', 'church', 'circular_farmland', 'cloud', 'commercial_area', 'dense_residential', 'desert', 'forest', 'freeway', 'golf_course', 'ground_track_field', 'harbor', 'industrial_area', 'intersection', 'island', 'lake', 'meadow', 'medium_residential', 'mobile_home_park', 'mountain', 'overpass', 'palace', 'parking_lot', 'railway', 'railway_station', 'rectangular_farmland', 'river', 'roundabout', 'runway', 'sea_ice', 'ship', 'snowberg', 'sparse_residential', 'stadium', 'storage_tank', 'tennis_court', 'terrace', 'thermal_power_station', 'wetland']
 
@@ -109,16 +109,16 @@ def from_keras(x):
 
 
 image_shape = (224, 224, 3)
-batch_size = 8
+batch_size = 45
 scale_min = 0.3
 scale_max = 1.0
 rotation_max = 22.5
-learning_rate = 200000.0
+learning_rate = 20.0
 max_iter = 1000
 
 _image_input = tf.keras.Input(shape=image_shape)
 _target_ys = tf.placeholder(tf.float32, shape=(None, 45))
-print(_target_ys.shape)
+
 
 
 model_kwargs = {} 
@@ -126,24 +126,21 @@ wrapper_kwargs = {}
 w_file = 'densenet121_resisc45_v1.h5' 
 model = get_art_model(model_kwargs, wrapper_kwargs, w_file)
 
-images_list, target_image  = list(), None
+images_list = list()
 dir = 'resisc45/'
 NUM = int(sys.argv[1])
-target_image_name = dir + '00000_'+str(NUM)+'.png'
+
 for image_path in tqdm(sorted(os.listdir('resisc45/'))):
     im = image.load_img(dir+image_path, target_size=(224, 224))
     im = image.img_to_array(im)
     im = np.expand_dims(im, axis=0)
-    im = preprocess_input(im)
-    if image_path.endswith(target_image_name):
-        target_image = im
-    else:
-        images_list.append(im)
+    im = preprocessing_fn(im)
+    images_list.append(im)
 
 print(len(images_list))
-images = random.sample(images_list, batch_size)
+images = images_list[:batch_size]
 images = np.concatenate(images, axis=0)
-
+mean, std = mean_std()
 
 ap = AdversarialPatch(
     classifier=model,
@@ -153,19 +150,22 @@ ap = AdversarialPatch(
     learning_rate=learning_rate,
     max_iter=max_iter,
     batch_size=batch_size, 
-    clip_patch=[(-103.939, 255.0 - 103.939), 
-                (-116.779, 255.0 - 116.779),
-                (-123.680, 255.0 - 123.680)]
+    clip_patch=[(-mean[0]/std[0], (1.0 - mean[0])/std[0]), 
+                (-mean[1]/std[1], (1.0 - mean[1])/std[1]),
+                (-mean[2]/std[2], (1.0 - mean[2])/std[2])]
 )
 
-
-patch, patch_mask = ap.generate(x=images)
-PATCH = (from_keras(patch) * patch_mask).astype(np.uint8)
+label = NUM
+y_one_hot = np.zeros(45)
+y_one_hot[NUM] = 1.0
+y_target = np.tile(y_one_hot, (images.shape[0], 1))
+patch, patch_mask = ap.generate(x=images, y=y_target)
+PATCH = (patch * patch_mask).astype(np.uint8)
 IMAGE = Image.fromarray(PATCH)
-IMAGE.save('resisc_patch.png')
-
-patched_images = ap.apply_patch(images, scale=0.25)
-
+IMAGE.save('patch.png')
+print("Patch Generated and saved")
+patched_images = ap.apply_patch(images, scale=SCALE)
+print("Patch Applied")
 PRED_NO_PATCH = []
 PRED = []
 
@@ -176,8 +176,8 @@ def predict_model(model, image0, ind, og0):
     image = np.expand_dims(image, axis=0)
     og = np.expand_dims(og, axis=0)
     
-    image = preprocess_input(image)
-    og = preprocess_input(og)
+    image = preprocessing_fn(image)
+    og = preprocessing_fn(og)
     
     prediction = model.predict(image)
     prediction_og = model.predict(og)
@@ -188,11 +188,23 @@ def predict_model(model, image0, ind, og0):
     top_idx = np.argsort(a)[-top:]
     top_v = [a[i] for i in top_idx]
     idx = [label_name[i] for i in top_idx]
-    img = 'results/im_'+str(ind)+'.png'
-    image2 = from_keras(image0).astype(np.uint8)
+    mean, std = mean_std()
+    image0 *= std
+    image0 += mean
+    image0*=255.0
+
+    img = 'results_g/im_'+str(ind)+'.png'
+    img2 = 'results_g/og_'+str(ind)+'.png'
+    og0 *= std
+    og0 += mean
+    og0*=255.0
+    image2 = image0.astype(np.uint8)
+    image3 = og0.astype(np.uint8)
     PRED.append(dict(zip(idx, top_v)))
     I = Image.fromarray(image2)
+    I2 = Image.fromarray(image3)
     I.save(img)
+    I2.save(img2)
     
     oga = np.asarray(prediction_og[0])
     ogtop_idx = np.argsort(oga)[-top:]
@@ -204,5 +216,5 @@ for i in tqdm(range(len(patched_images))):
     predict_model(model, patched_images[i,:,:,:], i, images[i,:,:,:])
 
 
-
+print("Inference completed")
 
